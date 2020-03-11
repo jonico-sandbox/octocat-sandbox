@@ -1,0 +1,86 @@
+name: Deploy to AWS
+on: [repository_dispatch]
+
+jobs:
+  deploy-to-aws:
+    runs-on: ubuntu-latest
+    if:  startsWith(github.event.action, 'deploy-to-aws')
+    steps:
+      - uses: actions/checkout@master
+        with:
+          ref: '${{github.event.client_payload.customerNormalized}}' 
+      - name: Set up Ruby 2.6
+        uses: actions/setup-ruby@v1
+        with:
+          ruby-version: 2.6.x
+      - name: Build Jekyll website
+        run: |
+          gem install bundler
+          bundle install
+          bundle exec jekyll build
+      - uses: jakejarvis/s3-sync-action@master
+        env:
+          SOURCE_DIR: "./_site"
+          AWS_REGION: "eu-west-1"
+          AWS_S3_BUCKET: "octogenerator-demo"
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Update issue success
+        if: (success())
+        env:
+          issue_number: '${{github.event.client_payload.issue}}'
+          cloud: '${{github.event.client_payload.cloud}}'
+          gprUrl: '${{github.event.client_payload.gprUrl}}'
+          customer: '${{github.event.client_payload.customer}}'
+        uses: actions/github-script@0.5.0
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const { issue_number, cloud, gprUrl, customer } = process.env;
+            github.issues.createComment({
+              issue_number: issue_number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'Deployed successfully to ' + cloud + ' for ' +  customer + ': ' + 'http://octogenerator-demo.s3-website-eu-west-1.amazonaws.com'
+            })
+            github.issues.addLabels({
+                issue_number: issue_number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['deployed']
+            })
+      - name: Trigger issue template update
+        if: (success())
+        env:
+          cloud: '${{github.event.client_payload.cloud}}'
+          url: 'http://octogenerator-demo.s3-website-eu-west-1.amazonaws.com'
+          customer: '${{github.event.client_payload.customer}}'
+        uses: actions/github-script@0.5.0
+        with:
+          github-token: ${{secrets.GPR_PAT}}
+          script: |
+            const { customer, cloud, url } = process.env;
+            github.repos.createDispatchEvent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              event_type: 'update-latest-env',
+              client_payload: { customer: customer, cloud: cloud, url: url }
+            })
+      - name: Update issue failure
+        if: (failure())
+        env:
+          issue_number: '${{github.event.client_payload.issue}}'
+          cloud: '${{github.event.client_payload.cloud}}'
+          gprUrl: '${{github.event.client_payload.gprUrl}}'
+          customer: '${{github.event.client_payload.customer}}'
+        uses: actions/github-script@0.5.0
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const { issue_number, cloud, gprUrl, customer } = process.env;
+            github.issues.createComment({
+              issue_number: issue_number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'Deployment to ' + cloud + ' failed for ' +  customer + ' :cry:'
+            })

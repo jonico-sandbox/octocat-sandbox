@@ -1,0 +1,92 @@
+name: Deploy to GCP
+on: [repository_dispatch]
+
+env:
+  PROJECT_ID: 'octodemo'
+  RUN_REGION: 'europe-west1'
+  SERVICE_NAME: 'octocatgen'
+  PKG_URL: '${{github.event.client_payload.gprUrl}}'
+
+jobs:
+  deploy-to-gcp:
+    runs-on: ubuntu-latest
+    if:  startsWith(github.event.action, 'deploy-to-gcp')
+    steps:
+    - name: Docker tag and pull 
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        docker login -u ${GITHUB_ACTOR} -p ${GITHUB_TOKEN} docker.pkg.github.com
+        docker pull $PKG_URL
+          
+    # Setup gcloud CLI
+    - uses: GoogleCloudPlatform/github-actions/setup-gcloud@master
+      with:
+        version: '281.0.0'
+        service_account_email: ${{ secrets.SA_EMAIL }}
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+
+    - run: gcloud projects list
+    
+    - run: |
+        gcloud config set project octodemo
+    
+    - run: |
+        gcloud auth configure-docker
+    
+    - name: Push image to Google Cloud Container Registry
+      run: |
+        docker tag $PKG_URL eu.gcr.io/octodemo/$SERVICE_NAME:$GITHUB_SHA
+        docker push eu.gcr.io/octodemo/$SERVICE_NAME:$GITHUB_SHA
+
+    # Deploy image to Cloud Run
+    - name: Deploy
+      run: |
+        yes | gcloud run deploy $SERVICE_NAME \
+          --region $RUN_REGION\
+          --image eu.gcr.io/octodemo/$SERVICE_NAME:$GITHUB_SHA \
+          --platform managed  --port 4000
+
+    # Get URL for Issue
+    - name: Get Service URL
+      run: |
+        echo ::set-env name=gcp_url::$(gcloud run services describe $SERVICE_NAME --platform managed --region $RUN_REGION --format 'value(status.url)')
+    - name: Update issue
+      env:
+        issue_number: '${{github.event.client_payload.issue}}'
+        cloud: '${{github.event.client_payload.cloud}}'
+        gprUrl: '${{github.event.client_payload.gprUrl}}'
+        customer: '${{github.event.client_payload.customer}}'
+      uses: actions/github-script@0.5.0
+      with:
+        github-token: ${{secrets.GITHUB_TOKEN}}
+        script: |
+          const { issue_number, cloud, gprUrl, customer } = process.env;
+          github.issues.createComment({
+            issue_number: issue_number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: 'Deployed successfully to ' + cloud + ' ( ' + gprUrl + ' ) for ' +  customer + ' at this url: ' + process.env.gcp_url
+          })
+          github.issues.addLabels({
+              issue_number: issue_number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['deployed']
+          })
+    - name: Trigger issue template update
+      if: (success())
+      env:
+        cloud: '${{github.event.client_payload.cloud}}'
+        customer: '${{github.event.client_payload.customer}}'
+      uses: actions/github-script@0.5.0
+      with:
+        github-token: ${{secrets.GPR_PAT}}
+        script: |
+          const { customer, cloud } = process.env;
+          github.repos.createDispatchEvent({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            event_type: 'update-latest-env',
+            client_payload: { customer: customer, cloud: cloud, url: process.env.gcp_url }
+          })
